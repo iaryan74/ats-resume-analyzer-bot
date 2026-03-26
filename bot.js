@@ -73,6 +73,34 @@ function getMimeType(fileName) {
   return mimeMap[ext] || 'text/plain';
 }
 
+// ─── Helpers ────────────────────────────────────────────────
+
+/**
+ * Escape special Markdown characters in text to prevent Telegram parse errors.
+ */
+function escapeMd(text) {
+  if (!text) return '';
+  return text
+    .replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+}
+
+/**
+ * Safely send a message — falls back to plain text if Markdown parsing fails.
+ */
+async function safeSendMessage(chatId, text, opts = {}) {
+  try {
+    await bot.sendMessage(chatId, text, opts);
+  } catch (err) {
+    // If Markdown parse failed, retry without parse_mode
+    if (opts.parse_mode) {
+      const plain = text.replace(/[_*`\[\]]/g, '');
+      await bot.sendMessage(chatId, plain);
+    } else {
+      throw err;
+    }
+  }
+}
+
 // ─── Format Output Message ──────────────────────────────────
 
 function formatResults(scoreResult, insights, aiSuggestions) {
@@ -129,7 +157,7 @@ function formatResults(scoreResult, insights, aiSuggestions) {
   // AI-Refined Suggestions
   msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
   msg += `🤖 *AI-Powered Suggestions:*\n\n`;
-  msg += aiSuggestions + '\n';
+  msg += escapeMd(aiSuggestions) + '\n';
 
   return msg;
 }
@@ -299,10 +327,10 @@ async function processAnalysis(chatId, session) {
     // Telegram messages have a 4096 char limit — split if needed
     if (resultMsg.length > 4000) {
       const mid = resultMsg.lastIndexOf('\n', 3900);
-      await bot.sendMessage(chatId, resultMsg.substring(0, mid), { parse_mode: 'Markdown' });
-      await bot.sendMessage(chatId, resultMsg.substring(mid), { parse_mode: 'Markdown' });
+      await safeSendMessage(chatId, resultMsg.substring(0, mid), { parse_mode: 'Markdown' });
+      await safeSendMessage(chatId, resultMsg.substring(mid), { parse_mode: 'Markdown' });
     } else {
-      await bot.sendMessage(chatId, resultMsg, { parse_mode: 'Markdown' });
+      await safeSendMessage(chatId, resultMsg, { parse_mode: 'Markdown' });
     }
 
     // Ask about optimization
@@ -353,7 +381,8 @@ async function processOptimization(chatId, session) {
     }
 
     for (const chunk of chunks) {
-      await bot.sendMessage(chatId, chunk, { parse_mode: 'Markdown' });
+      // Send optimized resume as plain text — AI output has unpredictable formatting
+      await bot.sendMessage(chatId, chunk);
     }
 
     await bot.sendMessage(
