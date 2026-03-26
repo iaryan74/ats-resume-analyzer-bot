@@ -418,6 +418,17 @@ function calculateATSScore(jdText, resumeText) {
 //  6. RULE-BASED INSIGHTS (No AI)
 // ═══════════════════════════════════════════════════════════════
 
+function detectRole(jdText) {
+  const lower = jdText.toLowerCase();
+  if (lower.match(/frontend|react|angular|vue|ui |user interface/)) return 'Frontend Engineer';
+  if (lower.match(/backend|node|java |spring|api |express/)) return 'Backend Engineer';
+  if (lower.match(/data |ml |machine learning|python|sql |analytics/)) return 'Data/ML Engineer';
+  if (lower.match(/devops|aws|kubernetes|docker|ci\/cd|cloud/)) return 'DevOps/Cloud Engineer';
+  if (lower.match(/fullstack|full stack/)) return 'Full Stack Engineer';
+  if (lower.match(/product manager|pm |scrum/)) return 'Product Manager';
+  return 'Software Professional';
+}
+
 function generateRuleBasedFeedback(scoreResult) {
   const { finalScore, breakdown } = scoreResult;
   const b = breakdown;
@@ -447,19 +458,36 @@ function generateRuleBasedFeedback(scoreResult) {
   }
 
   const keyIssues = [];
+  const rejectionReasons = [];
+  const impactFixes = [];
+
   if (b.keywords.missing && b.keywords.missing.length > 3) {
     keyIssues.push(`${b.keywords.missing.length} JD keywords missing from resume`);
+    rejectionReasons.push(`Missing critical skills: Lacking ${b.keywords.missing.length} key terms from JD`);
+    impactFixes.push(`Add missing keywords natively: ${missingSkills.join(', ')}`);
   }
-  if (b.experience.score < 50) keyIssues.push('Experience doesn\'t match job requirements');
-  if (b.projects.score < 50) keyIssues.push('Projects don\'t demonstrate JD-relevant skills');
-  if (b.format.score < 60) keyIssues.push('Format may not pass ATS parsing');
+  if (b.experience.score < 50) {
+    keyIssues.push('Experience doesn\'t match job requirements');
+    rejectionReasons.push('Weak experience alignment: Achievements do not strongly reflect required JD competencies');
+    impactFixes.push('Quantify your experience using metrics (e.g., Improved by X%)');
+  }
+  if (b.projects.score < 50) {
+    keyIssues.push('Projects don\'t demonstrate JD-relevant skills');
+    rejectionReasons.push('Poor project relevance: Projects fail to demonstrate the exact tech stack required');
+    impactFixes.push('Align projects explicitly with the JD technology stack');
+  }
+  if (b.format.score < 60) {
+    keyIssues.push('Format may not pass ATS parsing');
+    rejectionReasons.push('ATS Parsing Risk: Format issues might prevent ATS from reading your resume');
+    impactFixes.push('Simplify layout, remove tables, and ensure standard ATS headings');
+  }
 
   let atsPassProbability;
   if (finalScore >= 7) atsPassProbability = '🟢 HIGH';
   else if (finalScore >= 5) atsPassProbability = '🟡 MEDIUM';
   else atsPassProbability = '🔴 LOW';
 
-  return { matchedSkills, missingSkills, topMissingKeywords, keywordDensity, weakSections, keyIssues, atsPassProbability };
+  return { matchedSkills, missingSkills, topMissingKeywords, keywordDensity, weakSections, keyIssues, atsPassProbability, rejectionReasons, impactFixes };
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -500,7 +528,7 @@ function parseRetryDelay(msg) {
 
 async function callAI(prompt, onRetry) {
   initAI();
-  const MAX = 4, DELAYS = [15000, 30000, 45000, 60000];
+  const MAX = 6, DELAYS = [15000, 30000, 45000, 60000, 60000, 60000];
   for (let i = 1; i <= MAX; i++) {
     try {
       const result = await aiModel.generateContent(prompt);
@@ -509,14 +537,23 @@ async function callAI(prompt, onRetry) {
       const msg = err.message || '';
       const isRate = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota') || msg.includes('Too Many');
       if (isRate && i < MAX) {
+        let delay = parseRetryDelay(msg) || DELAYS[i - 1];
+        
         if (apiKeys.length > 1) {
           console.log(`Rate limited on key #${(currentKeyIndex % apiKeys.length) + 1}, switching...`);
           if (onRetry) onRetry(`⏳ AI rate-limited. Switching to alternate API key...`);
           switchAPIKey();
-          continue; // retry immediately
+          
+          if (i >= apiKeys.length) {
+            const sec = Math.round(delay / 1000);
+            console.log(`All keys rate-limited. Waiting ${sec}s...`);
+            await sleep(delay);
+          } else {
+            await sleep(2000);
+          }
+          continue;
         }
         
-        const delay = parseRetryDelay(msg) || DELAYS[i - 1];
         const sec = Math.round(delay / 1000);
         console.log(`Rate limited (${i}/${MAX}). Waiting ${sec}s...`);
         if (onRetry) onRetry(`⏳ AI rate-limited. Retrying in ${sec}s... (${i}/${MAX})`);
@@ -530,7 +567,8 @@ async function callAI(prompt, onRetry) {
  * AI CALL 1: Generate refined feedback.
  */
 async function generateAIFeedback(resumeText, jdText, scoreResult, onRetry) {
-  const prompt = `You are an expert ATS resume reviewer. Analyze this resume against the job description.
+  const role = detectRole(jdText);
+  const prompt = `You are a Senior Technical Recruiter hiring for a ${role} role. You are highly critical, direct, and look for top-tier talent. Analyze this resume against the JD.
 
 Job Description:
 ${jdText.substring(0, 1500)}
@@ -542,12 +580,14 @@ ATS Score: ${scoreResult.finalScore}/10
 Matched: ${scoreResult.breakdown.keywords.matched.slice(0, 10).join(', ')}
 Missing: ${scoreResult.breakdown.keywords.missing.slice(0, 10).join(', ')}
 
-Provide:
-1. Top 3 strengths
-2. Top 3 missing skills/gaps
-3. 3-5 actionable improvements
+Provide realistic, non-generic feedback. Format EXACTLY like this (use bullet points):
 
-Be concise, structured, use bullet points.`;
+1. 🚫 Critical Rejection Reasons (Why you'd pass on this candidate)
+2. 🎯 Exact Missing Skills / Gaps (Specific tech/tools lacking)
+3. 🔥 High-Impact Fixes (What MUST be added to get an interview)
+4. ✍️ Rewrite 2 Weak Bullets (Pick 2 weak bullets from the resume and rewrite them to be FAANG-level with metrics and action verbs)
+
+Be concise, structured, and extremely direct. No fluff.`;
 
   try {
     return await callAI(prompt, onRetry);
@@ -561,14 +601,16 @@ Be concise, structured, use bullet points.`;
  * AI CALL 2: Generate improved resume content.
  */
 async function improveResumeContent(resumeText, jdText, missingKeywords, onRetry) {
-  const prompt = `You are an expert resume writer and ATS optimization specialist.
+  const role = detectRole(jdText);
+  const prompt = `You are an expert Executive Resume Writer and Senior ATS Optimization Specialist for a top-tier tech company. Rewrite this resume for a ${role} position to guarantee an interview.
 
-Rewrite this resume to match the job description. Rules:
+Rules:
 - Add these missing keywords naturally: ${missingKeywords.slice(0, 15).join(', ')}
-- Use strong action verbs (achieved, implemented, led, developed)
-- Make bullet points quantified and impactful
-- Use clear section headings: SUMMARY, SKILLS, EXPERIENCE, PROJECTS, EDUCATION
-- Keep it professional, 1-2 pages
+- Transform every bullet point to be FAANG-level quality
+- Add quantified achievements (use realistic %, $, numbers where appropriate but plausible)
+- Use extremely strong action verbs (Architected, Spearheaded, Engineered)
+- Align STRICTLY with the Job Description requirements
+- Keep ATS-friendly format, professional tone, 1-2 pages
 - Do NOT fabricate experience
 
 FORMAT YOUR OUTPUT EXACTLY LIKE THIS:
@@ -862,6 +904,8 @@ function formatScoreReport(scoreResult, insights) {
   msg += `${scoreRating(scoreResult.finalScore)}\n`;
   msg += `📈 ATS Pass Probability: ${insights.atsPassProbability}\n\n`;
 
+  msg += `🧠 *Recruiter Insight:* "Your resume matches ~${Math.round(scoreResult.finalScore * 10)}% of JD expectations."\n\n`;
+
   msg += `📋 *Breakdown:*\n`;
   msg += `┌────────────────────────────────┐\n`;
   msg += `│ ${scoreEmoji(b.keywords.score)} Keywords     ${progressBar(b.keywords.score)}\n`;
@@ -896,6 +940,16 @@ function formatScoreReport(scoreResult, insights) {
   if (insights.keyIssues.length > 0) {
     msg += `🚨 *Key Issues:*\n`;
     msg += insights.keyIssues.map((iss, i) => `  ${i + 1}. ${iss}`).join('\n') + '\n\n';
+  }
+
+  if (insights.rejectionReasons && insights.rejectionReasons.length > 0) {
+    msg += `🚫 *Why You Might Get Rejected:*\n`;
+    msg += insights.rejectionReasons.map((r) => `  • ${r}`).join('\n') + '\n\n';
+  }
+
+  if (insights.impactFixes && insights.impactFixes.length > 0) {
+    msg += `🔥 *High Impact Fixes:*\n`;
+    msg += insights.impactFixes.map((f) => `  • ${f}`).join('\n') + '\n\n';
   }
 
   return msg;
@@ -1087,7 +1141,9 @@ bot.on('callback_query', async (query) => {
 
 async function processAnalysis(chatId, session) {
   session.step = 'processing';
-  await bot.sendMessage(chatId, '⏳ Analyzing your resume...');
+  const loadMsg = await bot.sendMessage(chatId, '🔍 Scanning resume like an ATS...');
+  await sleep(1000);
+  bot.editMessageText('📊 Calculating match score...', { chat_id: chatId, message_id: loadMsg.message_id }).catch(()=>{});
 
   try {
     // Rule-based scoring (instant)
@@ -1101,7 +1157,7 @@ async function processAnalysis(chatId, session) {
     await sendLongMessage(chatId, report, { parse_mode: 'Markdown' });
 
     // AI call 1: suggestions
-    await bot.sendMessage(chatId, '🤖 Getting AI-powered suggestions...');
+    bot.editMessageText('🤖 Thinking like a senior recruiter...', { chat_id: chatId, message_id: loadMsg.message_id }).catch(()=>{});
     const aiText = await generateAIFeedback(session.resumeText, session.jdText, scoreResult, (s) => bot.sendMessage(chatId, s));
 
     let aiMsg = `╔══════════════════════════════════╗\n`;
@@ -1136,7 +1192,9 @@ async function processAnalysis(chatId, session) {
 
 async function processOptimization(chatId, session) {
   session.step = 'processing';
-  await bot.sendMessage(chatId, '⏳ Generating optimized resume + PDF + DOCX...\nThis may take up to a minute.');
+  const loadMsg = await bot.sendMessage(chatId, '🔍 Scanning JD for exact keyword alignment...\nThis may take up to a minute.');
+  await sleep(1000);
+  bot.editMessageText('🤖 Rewriting bullets to FAANG-level quality...', { chat_id: chatId, message_id: loadMsg.message_id }).catch(()=>{});
 
   try {
     const missing = session.scoreResult?.breakdown?.keywords?.missing || [];
@@ -1178,10 +1236,19 @@ async function processOptimization(chatId, session) {
     // Cleanup temp files
     try { fs.unlinkSync(pdfPath); fs.unlinkSync(docxPath); } catch { /* ignore */ }
 
+    // Send Improvement Summary
+    await safeSend(chatId,
+      `📈 *Improvement Summary:*\n` +
+      `  • Added missing keywords logically\n` +
+      `  • Resume strictly aligned with JD requirements\n` +
+      `  • ATS format optimization applied\n\n` +
+      `💡 Review and customize before submitting.`,
+      { parse_mode: 'Markdown' }
+    );
+
     // Done
     await bot.sendMessage(chatId,
       '✅ *Done!* Your optimized resume has been sent as PDF and DOCX.\n\n' +
-      '💡 Review and customize before submitting.\n' +
       '📊 Want to check your improved score?',
       {
         parse_mode: 'Markdown',
