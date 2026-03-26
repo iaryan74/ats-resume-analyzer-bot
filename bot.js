@@ -467,12 +467,24 @@ function generateRuleBasedFeedback(scoreResult) {
 // ═══════════════════════════════════════════════════════════════
 
 let genAI = null, aiModel = null;
+let currentKeyIndex = 0;
+const apiKeys = [process.env.GEMINI_API_KEY];
+if (process.env.GEMINI_API_KEY_FALLBACK) {
+  apiKeys.push(process.env.GEMINI_API_KEY_FALLBACK);
+}
 
-function initAI() {
-  if (!genAI) {
-    genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+function initAI(forceRefresh = false) {
+  if (!genAI || forceRefresh) {
+    const key = apiKeys[currentKeyIndex % apiKeys.length];
+    genAI = new GoogleGenerativeAI(key);
     aiModel = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
   }
+}
+
+function switchAPIKey() {
+  currentKeyIndex++;
+  console.log(`Switched to API key #${(currentKeyIndex % apiKeys.length) + 1}`);
+  initAI(true);
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -494,6 +506,13 @@ async function callAI(prompt, onRetry) {
       const msg = err.message || '';
       const isRate = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('quota') || msg.includes('Too Many');
       if (isRate && i < MAX) {
+        if (apiKeys.length > 1) {
+          console.log(`Rate limited on key #${(currentKeyIndex % apiKeys.length) + 1}, switching...`);
+          if (onRetry) onRetry(`⏳ AI rate-limited. Switching to alternate API key...`);
+          switchAPIKey();
+          continue; // retry immediately
+        }
+        
         const delay = parseRetryDelay(msg) || DELAYS[i - 1];
         const sec = Math.round(delay / 1000);
         console.log(`Rate limited (${i}/${MAX}). Waiting ${sec}s...`);
