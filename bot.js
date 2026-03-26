@@ -472,6 +472,9 @@ const apiKeys = [process.env.GEMINI_API_KEY];
 if (process.env.GEMINI_API_KEY_FALLBACK) {
   apiKeys.push(process.env.GEMINI_API_KEY_FALLBACK);
 }
+if (process.env.GEMINI_API_KEY_FALLBACK_2) {
+  apiKeys.push(process.env.GEMINI_API_KEY_FALLBACK_2);
+}
 
 function initAI(forceRefresh = false) {
   if (!genAI || forceRefresh) {
