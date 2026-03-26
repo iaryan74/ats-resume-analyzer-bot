@@ -315,7 +315,9 @@ async function processAnalysis(chatId, session) {
     const insights = generateInsights(scoreResult);
 
     // Step 3: AI Call 1 — refine analysis
-    const aiSuggestions = await refineAnalysis(session.resumeText, session.jdText, scoreResult);
+    const aiSuggestions = await refineAnalysis(session.resumeText, session.jdText, scoreResult, (statusMsg) => {
+      bot.sendMessage(chatId, statusMsg);
+    });
 
     // Store results for potential optimization
     session.scoreResult = scoreResult;
@@ -359,7 +361,9 @@ async function processOptimization(chatId, session) {
 
   try {
     const missingKeywords = session.scoreResult?.breakdown?.keywords?.missing || [];
-    const optimized = await optimizeResume(session.resumeText, session.jdText, missingKeywords);
+    const optimized = await optimizeResume(session.resumeText, session.jdText, missingKeywords, (statusMsg) => {
+      bot.sendMessage(chatId, statusMsg);
+    });
 
     // Send optimized resume
     let optimizedMsg = `✅ *ATS-Optimized Resume:*\n`;
