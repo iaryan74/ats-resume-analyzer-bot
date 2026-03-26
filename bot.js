@@ -1,11 +1,12 @@
 /**
- * ATS Resume Analyzer — Telegram Bot
+ * ATS Resume Analyzer — Telegram Bot (v2.0 — Optimized)
  *
- * Conversation flow:
- *  1. /start → welcome, ask for JD
- *  2. Receive JD → ask for resume
- *  3. Receive resume → score, analyze, respond
- *  4. Ask "Want optimized resume?" → if yes, AI call 2
+ * Features:
+ *  - Inline keyboard buttons for smoother UX
+ *  - Visual progress bars in score output
+ *  - /cancel command
+ *  - Graceful error handling
+ *  - Multi-format resume support
  */
 
 require('dotenv').config();
@@ -31,7 +32,7 @@ if (!process.env.GEMINI_API_KEY) {
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 
-// In-memory per-chat conversation state (stateless — lost on restart)
+// In-memory per-chat state
 const sessions = new Map();
 
 function getSession(chatId) {
@@ -41,7 +42,11 @@ function getSession(chatId) {
   return sessions.get(chatId);
 }
 
-// ─── Helper: Download File from Telegram ────────────────────
+function resetSession(chatId) {
+  sessions.set(chatId, { step: 'idle', jdText: '', resumeText: '' });
+}
+
+// ─── Helpers ────────────────────────────────────────────────
 
 async function downloadFile(fileId) {
   const file = await bot.getFile(fileId);
@@ -58,244 +63,320 @@ async function downloadFile(fileId) {
   });
 }
 
-/**
- * Detect MIME type from Telegram file info.
- */
 function getMimeType(fileName) {
   if (!fileName) return 'text/plain';
   const ext = fileName.split('.').pop().toLowerCase();
-  const mimeMap = {
+  return {
     pdf: 'application/pdf',
     docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     doc: 'application/msword',
     txt: 'text/plain',
-  };
-  return mimeMap[ext] || 'text/plain';
+  }[ext] || 'text/plain';
 }
 
-// ─── Helpers ────────────────────────────────────────────────
-
 /**
- * Escape special Markdown characters in text to prevent Telegram parse errors.
+ * Escape Markdown special chars for safe Telegram rendering.
  */
 function escapeMd(text) {
   if (!text) return '';
-  return text
-    .replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
+  return text.replace(/([_*\[\]()~`>#+\-=|{}.!\\])/g, '\\$1');
 }
 
 /**
- * Safely send a message — falls back to plain text if Markdown parsing fails.
+ * Safe send — falls back to plain text if Markdown fails.
  */
-async function safeSendMessage(chatId, text, opts = {}) {
+async function safeSend(chatId, text, opts = {}) {
   try {
-    await bot.sendMessage(chatId, text, opts);
+    return await bot.sendMessage(chatId, text, opts);
   } catch (err) {
-    // If Markdown parse failed, retry without parse_mode
     if (opts.parse_mode) {
-      const plain = text.replace(/[_*`\[\]]/g, '');
-      await bot.sendMessage(chatId, plain);
-    } else {
-      throw err;
+      const plain = text.replace(/[_*`\[\]\\]/g, '');
+      return await bot.sendMessage(chatId, plain);
     }
+    throw err;
   }
 }
 
-// ─── Format Output Message ──────────────────────────────────
+/**
+ * Generate a visual progress bar.
+ */
+function progressBar(percent, width = 10) {
+  const filled = Math.round((percent / 100) * width);
+  const empty = width - filled;
+  const bar = '█'.repeat(filled) + '░'.repeat(empty);
+  return `${bar} ${percent}%`;
+}
 
-function formatResults(scoreResult, insights, aiSuggestions) {
+/**
+ * Get score emoji based on percentage.
+ */
+function scoreEmoji(percent) {
+  if (percent >= 80) return '🟢';
+  if (percent >= 60) return '🟡';
+  if (percent >= 40) return '🟠';
+  return '🔴';
+}
+
+/**
+ * Get final score rating text.
+ */
+function scoreRating(score) {
+  if (score >= 8) return '🌟 Excellent Match';
+  if (score >= 6) return '✅ Good Match';
+  if (score >= 4) return '⚠️ Needs Improvement';
+  return '❌ Poor Match';
+}
+
+// ─── Format Output ──────────────────────────────────────────
+
+function formatResults(scoreResult, insights) {
   const b = scoreResult.breakdown;
 
-  let msg = `📊 *ATS Resume Analysis Report*\n`;
-  msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+  let msg = '';
+  msg += `╔══════════════════════════════╗\n`;
+  msg += `    📊  *ATS ANALYSIS REPORT*\n`;
+  msg += `╚══════════════════════════════╝\n\n`;
 
-  // Final Score
-  msg += `🎯 *Match Score: ${scoreResult.finalScore}/10*\n`;
-  msg += `📈 ATS Pass Probability: ${insights.atsPassProbability}\n\n`;
+  // Final Score with visual rating
+  msg += `🎯 *Match Score:  ${scoreResult.finalScore} / 10*\n`;
+  msg += `${scoreRating(scoreResult.finalScore)}\n`;
+  msg += `📈 ATS Pass: ${insights.atsPassProbability}\n\n`;
 
-  // Breakdown
-  msg += `📋 *Score Breakdown:*\n`;
-  msg += `├─ 🔑 Keywords: ${b.keywords.score}% _(weight: ${b.keywords.weight})_\n`;
-  msg += `├─ 💼 Experience: ${b.experience.score}% _(weight: ${b.experience.weight})_\n`;
-  msg += `├─ 🛠 Projects: ${b.projects.score}% _(weight: ${b.projects.weight})_\n`;
-  msg += `├─ 🎓 Education: ${b.education.score}% _(weight: ${b.education.weight})_\n`;
-  msg += `└─ 📄 ATS Format: ${b.format.score}% _(weight: ${b.format.weight})_\n\n`;
+  // Score Breakdown with progress bars
+  msg += `📋 *SCORE BREAKDOWN*\n`;
+  msg += `┌──────────────────────────────┐\n`;
+  msg += `│ ${scoreEmoji(b.keywords.score)} Keywords     ${progressBar(b.keywords.score)}\n`;
+  msg += `│ ${scoreEmoji(b.experience.score)} Experience   ${progressBar(b.experience.score)}\n`;
+  msg += `│ ${scoreEmoji(b.projects.score)} Projects     ${progressBar(b.projects.score)}\n`;
+  msg += `│ ${scoreEmoji(b.education.score)} Education    ${progressBar(b.education.score)}\n`;
+  msg += `│ ${scoreEmoji(b.format.score)} Format       ${progressBar(b.format.score)}\n`;
+  msg += `└──────────────────────────────┘\n\n`;
 
   // Keyword Density
-  msg += `📊 *Keyword Density:* ${insights.keywordDensity}%\n\n`;
+  msg += `🔑 *Keyword Density:* ${insights.keywordDensity}% (${b.keywords.matched.length}/${jdCount(b)} JD terms)\n\n`;
 
   // Matched Skills
   if (insights.matchedSkills.length > 0) {
     msg += `✅ *Matched Skills:*\n`;
-    msg += insights.matchedSkills.map((s) => `  • ${s}`).join('\n') + '\n\n';
+    msg += insights.matchedSkills.map((s) => `  ✔ ${s}`).join('\n') + '\n\n';
   }
 
   // Missing Skills
   if (insights.missingSkills.length > 0) {
     msg += `❌ *Missing Skills:*\n`;
-    msg += insights.missingSkills.map((s) => `  • ${s}`).join('\n') + '\n\n';
+    msg += insights.missingSkills.map((s) => `  ✘ ${s}`).join('\n') + '\n\n';
   }
 
-  // Top Missing Keywords (bonus)
-  if (insights.topMissingKeywords.length > 5) {
-    msg += `🔍 *Top Missing Keywords:*\n`;
-    msg += insights.topMissingKeywords.map((k) => `  • ${k}`).join('\n') + '\n\n';
+  // Top Missing Keywords
+  if (insights.topMissingKeywords.length > 3) {
+    msg += `🔍 *All Missing Keywords:*\n`;
+    msg += `  ${insights.topMissingKeywords.join(' • ')}\n\n`;
   }
 
   // Weak Sections
   if (insights.weakSections.length > 0) {
-    msg += `⚠️ *Weak Sections:*\n`;
+    msg += `⚠️ *Areas to Improve:*\n`;
     msg += insights.weakSections.map((w) => `  ${w}`).join('\n') + '\n\n';
   }
 
   // Key Issues
   if (insights.keyIssues.length > 0) {
     msg += `🚨 *Key Issues:*\n`;
-    msg += insights.keyIssues.map((i, idx) => `  ${idx + 1}. ${i}`).join('\n') + '\n\n';
+    msg += insights.keyIssues.map((issue, i) => `  ${i + 1}. ${issue}`).join('\n') + '\n\n';
   }
-
-  // AI-Refined Suggestions
-  msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-  msg += `🤖 *AI-Powered Suggestions:*\n\n`;
-  msg += escapeMd(aiSuggestions) + '\n';
 
   return msg;
 }
 
-// ─── Bot Handlers ───────────────────────────────────────────
+function jdCount(breakdown) {
+  return (breakdown.keywords.matched.length || 0) + (breakdown.keywords.missing.length || 0);
+}
 
-// /start command
+function formatAISuggestions(aiText) {
+  let msg = `╔══════════════════════════════╗\n`;
+  msg += `   🤖  *AI-POWERED INSIGHTS*\n`;
+  msg += `╚══════════════════════════════╝\n\n`;
+  msg += escapeMd(aiText) + '\n';
+  return msg;
+}
+
+// ─── Bot Commands ───────────────────────────────────────────
+
 bot.onText(/\/start/, (msg) => {
   const chatId = msg.chat.id;
+  resetSession(chatId);
   const session = getSession(chatId);
   session.step = 'waiting_jd';
-  session.jdText = '';
-  session.resumeText = '';
 
   bot.sendMessage(
     chatId,
-    `👋 *Welcome to ATS Resume Analyzer!*\n\n` +
-    `I'll analyze your resume against a Job Description and give you:\n` +
-    `• ATS Match Score (out of 10)\n` +
-    `• Detailed breakdown\n` +
-    `• Missing skills & keywords\n` +
-    `• AI-powered suggestions\n` +
-    `• Optional ATS-optimized resume\n\n` +
-    `📝 *Step 1:* Send me the *Job Description*\n` +
-    `_(You can paste text or upload a PDF/DOCX file)_`,
-    { parse_mode: 'Markdown' }
-  );
+    `🤖 *ATS Resume Analyzer*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `I'll score your resume against a Job Description and help you get past ATS filters\\.\n\n` +
+    `📝 *Step 1 of 2:* Send me the *Job Description*\n\n` +
+    `_Paste the text, or upload a PDF/DOCX file\\._\n` +
+    `_Use /cancel to start over\\._`,
+    { parse_mode: 'MarkdownV2' }
+  ).catch(() => {
+    bot.sendMessage(
+      chatId,
+      `🤖 ATS Resume Analyzer\n━━━━━━━━━━━━━━━━━━━━━━\n\n` +
+      `I'll score your resume against a Job Description.\n\n` +
+      `📝 Step 1 of 2: Send me the Job Description\n` +
+      `(Paste text or upload PDF/DOCX)\n\n` +
+      `Use /cancel to start over.`
+    );
+  });
 });
 
-// /help command
 bot.onText(/\/help/, (msg) => {
   bot.sendMessage(
     msg.chat.id,
-    `📖 *How to use ATS Resume Analyzer:*\n\n` +
-    `1️⃣ Send /start to begin\n` +
-    `2️⃣ Paste or upload your Job Description\n` +
-    `3️⃣ Paste or upload your Resume\n` +
-    `4️⃣ Get your ATS score & analysis\n` +
+    `📖 *How to Use:*\n\n` +
+    `1️⃣ /start — Begin a new analysis\n` +
+    `2️⃣ Send Job Description (text or file)\n` +
+    `3️⃣ Send Resume (text, PDF, or DOCX)\n` +
+    `4️⃣ Get your ATS score & suggestions\n` +
     `5️⃣ Optionally get an optimized resume\n\n` +
-    `📎 *Supported formats:* PDF, DOCX, TXT, or plain text\n` +
-    `🔄 Send /start anytime to restart`,
+    `📎 *Supported:* PDF, DOCX, TXT\n` +
+    `🔄 /cancel — Reset and start over\n` +
+    `❓ /help — Show this message`,
     { parse_mode: 'Markdown' }
   );
 });
 
-// Handle document uploads
+bot.onText(/\/cancel/, (msg) => {
+  const chatId = msg.chat.id;
+  resetSession(chatId);
+  bot.sendMessage(chatId, '🔄 Session reset. Send /start to begin a new analysis.');
+});
+
+// ─── Handle Documents ───────────────────────────────────────
+
 bot.on('document', async (msg) => {
   const chatId = msg.chat.id;
   const session = getSession(chatId);
   const doc = msg.document;
 
   if (session.step !== 'waiting_jd' && session.step !== 'waiting_resume') {
-    bot.sendMessage(chatId, '⚠️ Please send /start first to begin the analysis.');
-    return;
+    return bot.sendMessage(chatId, '⚠️ Send /start first to begin.');
   }
 
   try {
-    bot.sendMessage(chatId, '📥 Downloading and processing your file...');
+    const statusMsg = await bot.sendMessage(chatId, '📥 Processing your file...');
 
     const buffer = await downloadFile(doc.file_id);
     const mimeType = getMimeType(doc.file_name);
     const text = await extractText(buffer, mimeType);
 
     if (!text || text.length < 20) {
-      bot.sendMessage(chatId, '❌ Could not extract enough text from the file. Please try pasting the text directly.');
-      return;
+      return bot.sendMessage(chatId, '❌ Could not extract enough text. Try pasting it directly.');
     }
+
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
 
     if (session.step === 'waiting_jd') {
       session.jdText = text;
       session.step = 'waiting_resume';
       bot.sendMessage(
         chatId,
-        `✅ *Job Description received!* (${text.split(/\s+/).length} words extracted)\n\n` +
-        `📄 *Step 2:* Now send me your *Resume*\n` +
-        `_(Paste text or upload a PDF/DOCX file)_`,
+        `✅ *Job Description received!* (${wordCount} words)\n\n` +
+        `📄 *Step 2 of 2:* Now send your *Resume*\n` +
+        `_(Paste text, or upload PDF/DOCX)_`,
         { parse_mode: 'Markdown' }
       );
-    } else if (session.step === 'waiting_resume') {
+    } else {
       session.resumeText = text;
       await processAnalysis(chatId, session);
     }
   } catch (err) {
-    console.error('File processing error:', err);
-    bot.sendMessage(chatId, '❌ Error processing your file. Please try pasting the text directly.');
+    console.error('File error:', err.message);
+    bot.sendMessage(chatId, '❌ Error processing file. Try pasting the text directly.');
   }
 });
 
-// Handle text messages
+// ─── Handle Photos ──────────────────────────────────────────
+
+bot.on('photo', (msg) => {
+  bot.sendMessage(
+    msg.chat.id,
+    '📸 I can\'t read images/scanned documents yet.\n\n' +
+    'Please send your resume as:\n' +
+    '• PDF file\n' +
+    '• DOCX file\n' +
+    '• Or paste the text directly'
+  );
+});
+
+// ─── Handle Text ────────────────────────────────────────────
+
 bot.on('text', async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
 
-  // Ignore commands
   if (text.startsWith('/')) return;
 
   const session = getSession(chatId);
 
   if (session.step === 'waiting_jd') {
     if (text.length < 20) {
-      bot.sendMessage(chatId, '⚠️ That seems too short for a Job Description. Please send more details.');
-      return;
+      return bot.sendMessage(chatId, '⚠️ Too short for a JD. Paste the full job description.');
     }
     session.jdText = text;
     session.step = 'waiting_resume';
+    const wordCount = text.split(/\s+/).filter(Boolean).length;
     bot.sendMessage(
       chatId,
-      `✅ *Job Description received!* (${text.split(/\s+/).length} words)\n\n` +
-      `📄 *Step 2:* Now send me your *Resume*\n` +
-      `_(Paste text or upload a PDF/DOCX file)_`,
+      `✅ *Job Description received!* (${wordCount} words)\n\n` +
+      `📄 *Step 2 of 2:* Now send your *Resume*\n` +
+      `_(Paste text, or upload PDF/DOCX)_`,
       { parse_mode: 'Markdown' }
     );
   } else if (session.step === 'waiting_resume') {
-    if (text.length < 20) {
-      bot.sendMessage(chatId, '⚠️ That seems too short for a Resume. Please send more details.');
-      return;
+    if (text.length < 30) {
+      return bot.sendMessage(chatId, '⚠️ Too short for a resume. Paste your full resume.');
     }
     session.resumeText = text;
     await processAnalysis(chatId, session);
-  } else if (session.step === 'waiting_optimize') {
-    const lower = text.toLowerCase().trim();
-    if (lower === 'yes' || lower === 'y') {
-      await processOptimization(chatId, session);
-    } else if (lower === 'no' || lower === 'n') {
-      bot.sendMessage(
-        chatId,
-        `👍 No problem! Use the suggestions above to improve your resume manually.\n\n` +
-        `🔄 Send /start to analyze another resume.`,
-        { parse_mode: 'Markdown' }
-      );
-      session.step = 'idle';
-    } else {
-      bot.sendMessage(chatId, '🤔 Please reply with *Yes* or *No*.', { parse_mode: 'Markdown' });
-    }
   } else {
+    bot.sendMessage(chatId, '👋 Send /start to begin analyzing your resume.');
+  }
+});
+
+// ─── Handle Inline Button Clicks ────────────────────────────
+
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const session = getSession(chatId);
+  const data = query.data;
+
+  // Acknowledge the button press
+  await bot.answerCallbackQuery(query.id);
+
+  // Remove the inline keyboard
+  try {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  } catch (e) { /* ignore */ }
+
+  if (data === 'optimize_yes' && session.step === 'waiting_optimize') {
+    await processOptimization(chatId, session);
+  } else if (data === 'optimize_no' && session.step === 'waiting_optimize') {
     bot.sendMessage(
       chatId,
-      `👋 Hi! Send /start to begin analyzing your resume against a Job Description.`
+      '👍 No problem! Use the suggestions above to improve manually.\n\n🔄 Send /start for a new analysis.'
+    );
+    session.step = 'idle';
+  } else if (data === 'new_analysis') {
+    resetSession(chatId);
+    const newSession = getSession(chatId);
+    newSession.step = 'waiting_jd';
+    bot.sendMessage(
+      chatId,
+      '📝 Send me the *Job Description* (text or file)',
+      { parse_mode: 'Markdown' }
     );
   }
 });
@@ -305,59 +386,58 @@ bot.on('text', async (msg) => {
 async function processAnalysis(chatId, session) {
   session.step = 'processing';
 
-  bot.sendMessage(chatId, '⏳ *Analyzing your resume...* This may take a moment.', { parse_mode: 'Markdown' });
+  const loadingMsg = await bot.sendMessage(chatId, '⏳ Analyzing your resume against the JD...');
 
   try {
     // Step 1: Rule-based scoring
     const scoreResult = calculateATSScore(session.jdText, session.resumeText);
-
-    // Step 2: Generate rule-based insights
     const insights = generateInsights(scoreResult);
 
-    // Step 3: AI Call 1 — refine analysis
+    // Store for later
+    session.scoreResult = scoreResult;
+    session.insights = insights;
+
+    // Step 2: Send rule-based results immediately (don't wait for AI)
+    const resultMsg = formatResults(scoreResult, insights);
+    await sendLongMessage(chatId, resultMsg, { parse_mode: 'Markdown' });
+
+    // Step 3: AI suggestions (may take time / retry)
+    await bot.sendMessage(chatId, '🤖 Getting AI-powered insights...');
     const aiSuggestions = await refineAnalysis(session.resumeText, session.jdText, scoreResult, (statusMsg) => {
       bot.sendMessage(chatId, statusMsg);
     });
 
-    // Store results for potential optimization
-    session.scoreResult = scoreResult;
-    session.insights = insights;
+    const aiMsg = formatAISuggestions(aiSuggestions);
+    await sendLongMessage(chatId, aiMsg, { parse_mode: 'Markdown' });
 
-    // Format and send results
-    const resultMsg = formatResults(scoreResult, insights, aiSuggestions);
-
-    // Telegram messages have a 4096 char limit — split if needed
-    if (resultMsg.length > 4000) {
-      const mid = resultMsg.lastIndexOf('\n', 3900);
-      await safeSendMessage(chatId, resultMsg.substring(0, mid), { parse_mode: 'Markdown' });
-      await safeSendMessage(chatId, resultMsg.substring(mid), { parse_mode: 'Markdown' });
-    } else {
-      await safeSendMessage(chatId, resultMsg, { parse_mode: 'Markdown' });
-    }
-
-    // Ask about optimization
+    // Step 4: Ask about optimization with inline buttons
     session.step = 'waiting_optimize';
     await bot.sendMessage(
       chatId,
-      `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n` +
-      `✨ *Want an ATS-optimized version of your resume?*\n\n` +
-      `I'll rewrite your resume to:\n` +
-      `• Add missing keywords naturally\n` +
-      `• Improve bullet points with action verbs\n` +
-      `• Make it more ATS-friendly\n\n` +
-      `Reply *Yes* or *No*`,
-      { parse_mode: 'Markdown' }
+      '✨ *Want an ATS-optimized version of your resume?*\n\n' +
+      'I\'ll rewrite it to include missing keywords, stronger action verbs, and better structure.',
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              { text: '✅ Yes, optimize!', callback_data: 'optimize_yes' },
+              { text: '❌ No thanks', callback_data: 'optimize_no' },
+            ],
+          ],
+        },
+      }
     );
   } catch (err) {
     console.error('Analysis error:', err);
-    bot.sendMessage(chatId, '❌ An error occurred during analysis. Please try again with /start');
+    bot.sendMessage(chatId, '❌ Analysis failed. Please try again with /start');
     session.step = 'idle';
   }
 }
 
 async function processOptimization(chatId, session) {
   session.step = 'processing';
-  bot.sendMessage(chatId, '⏳ *Generating your optimized resume...* This may take a moment.', { parse_mode: 'Markdown' });
+  await bot.sendMessage(chatId, '⏳ Generating your optimized resume... This may take up to a minute.');
 
   try {
     const missingKeywords = session.scoreResult?.breakdown?.keywords?.missing || [];
@@ -365,45 +445,61 @@ async function processOptimization(chatId, session) {
       bot.sendMessage(chatId, statusMsg);
     });
 
-    // Send optimized resume
-    let optimizedMsg = `✅ *ATS-Optimized Resume:*\n`;
-    optimizedMsg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-    optimizedMsg += optimized;
-
-    // Split if too long (Telegram limit)
-    const chunks = [];
-    let remaining = optimizedMsg;
-    while (remaining.length > 0) {
-      if (remaining.length <= 4000) {
-        chunks.push(remaining);
-        break;
-      }
-      const splitAt = remaining.lastIndexOf('\n', 3900);
-      const idx = splitAt > 0 ? splitAt : 3900;
-      chunks.push(remaining.substring(0, idx));
-      remaining = remaining.substring(idx);
-    }
-
-    for (const chunk of chunks) {
-      // Send optimized resume as plain text — AI output has unpredictable formatting
-      await bot.sendMessage(chatId, chunk);
-    }
-
+    // Send header
     await bot.sendMessage(
       chatId,
-      `\n💡 *Tip:* Copy the optimized resume above and tailor it further to your style.\n\n` +
-      `🔄 Send /start to analyze another resume.`,
+      '╔══════════════════════════════╗\n' +
+      '    ✨  *OPTIMIZED RESUME*\n' +
+      '╚══════════════════════════════╝',
       { parse_mode: 'Markdown' }
+    );
+
+    // Send optimized resume as plain text (AI output has unpredictable formatting)
+    await sendLongMessage(chatId, optimized);
+
+    // Done — offer new analysis
+    await bot.sendMessage(
+      chatId,
+      '💡 *Tip:* Copy the resume above and customize it further.\n\n' +
+      '📊 Want to check how much your score improved?',
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🔄 New Analysis', callback_data: 'new_analysis' }],
+          ],
+        },
+      }
     );
   } catch (err) {
     console.error('Optimization error:', err);
-    bot.sendMessage(chatId, '❌ Resume optimization failed. Please try again with /start');
+    bot.sendMessage(chatId, '❌ Optimization failed. Please try /start again.');
   }
 
   session.step = 'idle';
 }
 
+/**
+ * Send long messages, splitting at line boundaries to stay under Telegram's 4096 limit.
+ */
+async function sendLongMessage(chatId, text, opts = {}) {
+  const MAX = 4000;
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= MAX) {
+      await safeSend(chatId, remaining, opts);
+      break;
+    }
+    // Split at last newline before limit
+    let splitAt = remaining.lastIndexOf('\n', MAX);
+    if (splitAt <= 0) splitAt = MAX;
+    await safeSend(chatId, remaining.substring(0, splitAt), opts);
+    remaining = remaining.substring(splitAt).trimStart();
+  }
+}
+
 // ─── Startup ────────────────────────────────────────────────
 
-console.log('🤖 ATS Resume Analyzer Bot is running...');
+console.log('🤖 ATS Resume Analyzer Bot v2.0 is running...');
 console.log('Send /start to your bot on Telegram to begin!');
