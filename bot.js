@@ -773,8 +773,22 @@ async function processOptimization(chatId, session) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  STARTUP
+//  STARTUP + HEALTH CHECK SERVER (for Render free tier)
 // ═══════════════════════════════════════════════════════════════
+
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', bot: 'Resume Analyzer Pro v5.0', uptime: process.uptime() }));
+  } else {
+    res.writeHead(404);
+    res.end('Not found');
+  }
+}).listen(PORT, () => {
+  console.log(`🌐 Health check server running on port ${PORT}`);
+});
 
 console.log('═══════════════════════════════════════');
 console.log('  🤖 Resume Analyzer Pro v5.0');

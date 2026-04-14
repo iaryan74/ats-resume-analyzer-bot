@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: ats-resume-analyzer-bot
     runtime: node
     buildCommand: npm install
